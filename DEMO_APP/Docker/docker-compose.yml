@@ -1,0 +1,32 @@
+version: '3'
+services:
+  nginx:
+    build:
+      context: '..'
+      dockerfile: 'docker/nginx/Dockerfile'
+    depends_on:
+    - php
+    network_mode: 'service:php' # use network interface of php container to simulate awsvpc network mode
+  php:
+    build:
+      context: '..'
+      dockerfile: 'docker/php-fpm/Dockerfile'
+    ports:
+    - '8080:80' # forwards port of nginx container
+    depends_on:
+    - mysql
+    environment:
+      DATABASE_HOST: mysql
+      DATABASE_NAME: app
+      DATABASE_USER: app
+      DATABASE_PASSWORD: secret
+  mysql:
+    image: 'mysql:5.6'
+    command: '--default-authentication-plugin=mysql_native_password'
+    ports:
+    - '3306:3306'
+    environment:
+      MYSQL_ROOT_PASSWORD: secret
+      MYSQL_DATABASE: app
+      MYSQL_USER: app
+      MYSQL_PASSWORD: secret
