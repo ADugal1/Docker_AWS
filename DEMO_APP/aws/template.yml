@@ -1,0 +1,323 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Rapid Docker on AWS: Demo application'
+Parameters:
+  AppImage:
+    Description: 'The Docker image to use for the app container.'
+    Type: String
+    Default: 'cloudonaut/docker-on-aws-demo-app-php-fpm:latest'
+  ProxyImage:
+    Description: 'Docker image to use for the proxy container.'
+    Type: String
+    Default: 'cloudonaut/docker-on-aws-demo-app-nginx:latest'
+  ScheduledTaskImage:
+    Description: 'Docker image to use for the scheduled task container.'
+    Type: String
+    Default: ''
+  PhpMyAdminAppImage:
+    Description: 'Docker image to use for the phpmyadmin container.'
+    Type: String
+    Default: 'cloudonaut/docker-on-aws-phpmyadmin-app:latest'
+  PhpMyAdminProxyImage:
+    Description: 'Docker image to use for the phpmyadmin proxy container.'
+    Type: String
+    Default: 'cloudonaut/docker-on-aws-phpmyadmin-nginx:latest'
+  HostedZoneId:
+    Description: 'Optional hosted zone id to enable HTTPS and a custom domain name.'
+    Type: String
+    Default: ''
+  SubDomainNameWithDot:
+    Description: 'Name that is used to create the DNS entry with trailing dot, e.g. §{SubDomainNameWithDot}§{HostedZoneName}. (Leave blank for naked (or apex and bare) domain; Requires HostedZoneId to be set.)'
+    Type: String
+    Default: 'app.'
+  AdminEmail:
+    Description: 'Optional email address of the administrator.'
+    Type: String
+    Default: ''
+  EnablePhpMyAdmin:
+    Description: 'Enable phpMyAdmin? (Requires HostedZoneId and AdminEmail to be set.)'
+    Type: String
+    Default: 'false'
+    AllowedValues:
+    - 'true'
+    - 'false'
+Conditions:
+  HasScheduledTaskImage: !Not [!Equals ['', !Ref ScheduledTaskImage]]
+  HasHostedZoneId: !Not [!Equals ['', !Ref HostedZoneId]]
+  HasAdminEmail: !Not [!Equals ['', !Ref AdminEmail]]
+  WithPhpMyAdmin: !And [!Equals ['true', !Ref EnablePhpMyAdmin], !Condition HasHostedZoneId, !Condition HasAdminEmail]
+Resources:
+  Alerting:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        Email: !If [HasAdminEmail, !Ref AdminEmail, !Ref 'AWS::NoValue']
+        # HttpsEndpoint: 'https://api.marbot.io/v1/endpoint/xyz' # or uncommnet and receive alerts in Slack or Microsoft Teams using marbot.io
+      TemplateURL: './node_modules/@cfn-modules/alerting/module.yml'
+  Dashboard:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        DashboardName: !Ref 'AWS::StackName'
+        AlbModule: !GetAtt 'Alb.Outputs.StackName'
+        FargateServiceModule: !GetAtt 'AppService.Outputs.StackName'
+        RdsAuroraServerlessModule: !GetAtt 'AuroraServerlessCluster.Outputs.StackName'
+      TemplateURL: './node_modules/@cfn-modules/cloudwatch-dashboard/module.yml'
+  Key:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        AlertingModule: !GetAtt 'Alerting.Outputs.StackName'
+      TemplateURL: './node_modules/@cfn-modules/kms-key/module.yml'
+  DatabaseSecret:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        KmsKeyModule: !GetAtt 'Key.Outputs.StackName'
+        Description: !Sub '${AWS::StackName}: database password'
+      TemplateURL: './node_modules/@cfn-modules/secret/module.yml'
+  CookieSecret:
+    Condition: WithPhpMyAdmin
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        KmsKeyModule: !GetAtt 'Key.Outputs.StackName'
+        Description: !Sub '${AWS::StackName}: phpMyAdmin cookie secret'
+        PasswordLength: '32'
+      TemplateURL: './node_modules/@cfn-modules/secret/module.yml'
+  Vpc:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        AlertingModule: !GetAtt 'Alerting.Outputs.StackName'
+        NatGateways: 'false' # reduce costs
+      TemplateURL: './node_modules/@cfn-modules/vpc/module.yml'
+  #############################################################################
+  #                                                                           #
+  #                      RDS Auroa Serverless resources                       #
+  #                                                                           #
+  #############################################################################
+  AuroraServerlessClientSg:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        VpcModule: !GetAtt 'Vpc.Outputs.StackName'
+      TemplateURL: './node_modules/@cfn-modules/client-sg/module.yml'
+  AuroraServerlessCluster:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        VpcModule: !GetAtt 'Vpc.Outputs.StackName'
+        ClientSgModule: !GetAtt 'AuroraServerlessClientSg.Outputs.StackName'
+        KmsKeyModule: !GetAtt 'Key.Outputs.StackName'
+        AlertingModule: !GetAtt 'Alerting.Outputs.StackName'
+        SecretModule: !GetAtt 'DatabaseSecret.Outputs.StackName'
+        DBName: test
+        DBMasterUsername: master
+        AutoPause: 'true'
+        SecondsUntilAutoPause: '900'
+        MinCapacity: '1'
+        MaxCapacity: '2'
+        EngineVersion: '5.6.10a'
+      TemplateURL: './node_modules/@cfn-modules/rds-aurora-serverless/module.yml'
+  #############################################################################
+  #                                                                           #
+  #                   Application load balancer resources                     #
+  #                                                                           #
+  #############################################################################
+  Alb:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        VpcModule: !GetAtt 'Vpc.Outputs.StackName'
+        AlertingModule: !GetAtt 'Alerting.Outputs.StackName'
+      TemplateURL: './node_modules/@cfn-modules/alb/module.yml'
+  AlbListenerHttp:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        AlbModule: !GetAtt 'Alb.Outputs.StackName'
+        Port: '80'
+      TemplateURL: './node_modules/@cfn-modules/alb-listener/module.yml'
+  AlbListenerHttps:
+    Condition: HasHostedZoneId
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        AlbModule: !GetAtt 'Alb.Outputs.StackName'
+        Port: '443'
+        CertificateArn: !GetAtt 'Certificate.Outputs.Arn'
+      TemplateURL: './node_modules/@cfn-modules/alb-listener/module.yml'
+  AppTarget:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        AlbModule: !GetAtt 'Alb.Outputs.StackName'
+        AlbListenerModule: !If [HasHostedZoneId, !GetAtt 'AlbListenerHttps.Outputs.StackName', !GetAtt 'AlbListenerHttp.Outputs.StackName']
+        VpcModule: !GetAtt 'Vpc.Outputs.StackName'
+        AlertingModule: !GetAtt 'Alerting.Outputs.StackName'
+        Priority: '2'
+        HealthCheckPath: '/health-check.php'
+      TemplateURL: './node_modules/@cfn-modules/ecs-alb-target/module.yml'
+  PhpMyAdminTarget:
+    Condition: WithPhpMyAdmin
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        AlbModule: !GetAtt 'Alb.Outputs.StackName'
+        AlbListenerModule: !GetAtt 'AlbListenerHttps.Outputs.StackName'
+        VpcModule: !GetAtt 'Vpc.Outputs.StackName'
+        AlertingModule: !GetAtt 'Alerting.Outputs.StackName'
+        CognitoUserPoolModule: !GetAtt 'UserPool.Outputs.StackName'
+        AuthCallbackDomain: !Sub '${SubDomainNameWithDot}${HostedZone.Outputs.Name}'
+        Priority: '1'
+        PathPattern: '/phpmyadmin/*'
+        HealthCheckPath: '/phpmyadmin/'
+      TemplateURL: './node_modules/@cfn-modules/ecs-alb-target/module.yml'
+  Redirect:
+    Condition: HasHostedZoneId
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        AlbListenerModule: !GetAtt 'AlbListenerHttp.Outputs.StackName'
+        Priority: '3'
+      TemplateURL: './node_modules/@cfn-modules/alb-redirect-to-https/module.yml'
+  UserPool:
+    Condition: WithPhpMyAdmin
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        InitialUser: !Ref AdminEmail
+      TemplateURL: './node_modules/@cfn-modules/cognito-userpool/module.yml'
+  #############################################################################
+  #                                                                           #
+  #                         ECS / Fargate resources                           #
+  #                                                                           #
+  #############################################################################
+  Cluster:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      TemplateURL: './node_modules/@cfn-modules/ecs-cluster/module.yml'
+  AppService:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        VpcModule: !GetAtt 'Vpc.Outputs.StackName'
+        ClusterModule: !GetAtt 'Cluster.Outputs.StackName'
+        TargetModule: !GetAtt 'AppTarget.Outputs.StackName'
+        AlertingModule: !GetAtt 'Alerting.Outputs.StackName'
+        ClientSgModule1: !GetAtt 'AuroraServerlessClientSg.Outputs.StackName'
+        ProxyImage: !Ref ProxyImage
+        ProxyPort: '80'
+        AppImage: !Ref AppImage
+        AppPort: '9000'
+        AppEnvironment1Key: 'DATABASE_PASSWORD'
+        AppEnvironment1SecretModule: !GetAtt 'DatabaseSecret.Outputs.StackName'
+        AppEnvironment2Key: 'DATABASE_HOST'
+        AppEnvironment2Value: !GetAtt 'AuroraServerlessCluster.Outputs.DnsName'
+        AppEnvironment3Key: 'DATABASE_NAME'
+        AppEnvironment3Value: 'test'
+        AppEnvironment4Key: 'DATABASE_USER'
+        AppEnvironment4Value: 'master'
+        Cpu: '0.25'
+        Memory: '0.5'
+        DesiredCount: '2'
+        MaxCapacity: '4'
+        MinCapacity: '2'
+        LogsRetentionInDays: '14'
+      TemplateURL: './node_modules/@cfn-modules/fargate-service/module.yml'
+  PhpMyAdminService:
+    Condition: WithPhpMyAdmin
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        VpcModule: !GetAtt 'Vpc.Outputs.StackName'
+        ClusterModule: !GetAtt 'Cluster.Outputs.StackName'
+        TargetModule: !GetAtt 'PhpMyAdminTarget.Outputs.StackName'
+        AlertingModule: !GetAtt 'Alerting.Outputs.StackName'
+        ClientSgModule1: !GetAtt 'AuroraServerlessClientSg.Outputs.StackName'
+        ProxyImage: !Ref PhpMyAdminProxyImage
+        ProxyPort: '80'
+        AppImage: !Ref PhpMyAdminAppImage
+        AppPort: '9000'
+        AppEnvironment1Key: 'DATABASE_HOST'
+        AppEnvironment1Value: !GetAtt 'AuroraServerlessCluster.Outputs.DnsName'
+        AppEnvironment2Key: 'COOKIE_SECRET'
+        AppEnvironment2SecretModule: !GetAtt 'CookieSecret.Outputs.StackName'
+        Cpu: '0.25'
+        Memory: '0.5'
+        DesiredCount: '1'
+        MaxCapacity: '1'
+        MinCapacity: '1'
+        LogsRetentionInDays: '14'
+      TemplateURL: './node_modules/@cfn-modules/fargate-service/module.yml'
+  ScheduledTask:
+    Condition: HasScheduledTaskImage
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        VpcModule: !GetAtt 'Vpc.Outputs.StackName'
+        ClusterModule: !GetAtt 'Cluster.Outputs.StackName'
+        AlertingModule: !GetAtt 'Alerting.Outputs.StackName'
+        ClientSgModule1: !GetAtt 'AuroraServerlessClientSg.Outputs.StackName'
+        AppImage: !Ref ScheduledTaskImage
+        AppEnvironment1Key: 'DATABASE_PASSWORD'
+        AppEnvironment1SecretModule: !GetAtt 'DatabaseSecret.Outputs.StackName'
+        AppEnvironment2Key: 'DATABASE_HOST'
+        AppEnvironment2Value: !GetAtt 'AuroraServerlessCluster.Outputs.DnsName'
+        AppEnvironment3Key: 'DATABASE_NAME'
+        AppEnvironment3Value: 'test'
+        AppEnvironment4Key: 'DATABASE_USER'
+        AppEnvironment4Value: 'master'
+        Cpu: '0.25'
+        Memory: '0.5'
+        LogsRetentionInDays: '14'
+        ScheduleExpression: 'rate(5 minutes)'
+        Timeout: '300'
+      TemplateURL: './node_modules/@cfn-modules/fargate-scheduled-task/module.yml'
+  #############################################################################
+  #                                                                           #
+  #                     HTTPS / custom domain resources                       #
+  #                                                                           #
+  #############################################################################
+  HostedZone:
+    Condition: HasHostedZoneId
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        Id: !Ref HostedZoneId
+      TemplateURL: './node_modules/@cfn-modules/route53-hosted-zone-wrapper/module.yml'
+  Certificate:
+    Condition: HasHostedZoneId
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        HostedZoneModule: !GetAtt 'HostedZone.Outputs.StackName'
+      TemplateURL: './node_modules/@cfn-modules/acm-wildcard-certificate-public/module.yml'
+  CustomDomain:
+    Condition: HasHostedZoneId
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        HostedZoneModule: !GetAtt 'HostedZone.Outputs.StackName'
+        LoadBalancerModule: !GetAtt 'Alb.Outputs.StackName'
+        SubDomainNameWithDot: !Ref SubDomainNameWithDot
+      TemplateURL: './node_modules/@cfn-modules/lb-dns-record/module.yml'
+Outputs:
+  Url:
+    Value: !If [HasHostedZoneId, !Sub 'https://${SubDomainNameWithDot}${HostedZone.Outputs.Name}', !Sub 'http://${Alb.Outputs.DnsName}/']
+  PhpMyAdminUrl:
+    Condition: WithPhpMyAdmin
+    Value: !Sub 'https://${SubDomainNameWithDot}${HostedZone.Outputs.Name}/phpmyadmin/'
+  AlbDnsName:
+    Value: !GetAtt 'Alb.Outputs.DnsName'
+  KeyArn:
+    Value: !GetAtt 'Key.Outputs.Arn'
+  AppTargetGroupArn:
+    Value: !GetAtt 'AppTarget.Outputs.Arn'
+  DashboardUrl:
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}'
+  AppLogsUrl:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#logs-insights:queryDetail=~(source~(~'${AppService.Outputs.LogGroupName}))"
+  DatabaseSecretArn:
+    Value: !GetAtt 'DatabaseSecret.Outputs.Arn'

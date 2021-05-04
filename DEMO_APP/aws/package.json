@@ -1,0 +1,28 @@
+{
+  "name": "rapid-docker-on-aws-demo-app",
+  "version": "1.0.0",
+  "description": "Enterprise Docker on AWS: Demo",
+  "author": "Andrew Dugal <adugal.9@gmail.com>",
+  "license": "Apache-2.0",
+  "private": true,
+  "dependencies": {
+    "@cfn-modules/acm-wildcard-certificate-public": "1.0.0",
+    "@cfn-modules/alb": "1.0.4",
+    "@cfn-modules/alb-listener": "1.1.0",
+    "@cfn-modules/alb-redirect-to-https": "1.0.1",
+    "@cfn-modules/alerting": "1.2.0",
+    "@cfn-modules/client-sg": "1.0.0",
+    "@cfn-modules/cloudwatch-dashboard": "1.4.0",
+    "@cfn-modules/cognito-userpool": "2.0.0",
+    "@cfn-modules/ecs-alb-target": "1.3.0",
+    "@cfn-modules/ecs-cluster": "1.1.0",
+    "@cfn-modules/fargate-scheduled-task": "1.3.1",
+    "@cfn-modules/fargate-service": "2.7.0",
+    "@cfn-modules/kms-key": "1.2.1",
+    "@cfn-modules/lb-dns-record": "1.0.0",
+    "@cfn-modules/rds-aurora-serverless": "1.5.1",
+    "@cfn-modules/route53-hosted-zone-wrapper": "1.5.0",
+    "@cfn-modules/secret": "1.3.0",
+    "@cfn-modules/vpc": "1.3.0"
+  }
+}
