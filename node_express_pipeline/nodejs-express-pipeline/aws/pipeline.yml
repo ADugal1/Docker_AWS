@@ -1,0 +1,181 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Rapid Docker on AWS: Deployment Pipeline for Node.js Express'
+Parameters:
+  CodeCommitRepositoryName:
+    Description: 'Name of the CodeCommit repository.'
+    Type: String
+    Default: 'nodejs-express'
+  AdminEmail:
+    Description: 'Optional email address of the administrator.'
+    Type: String
+    Default: ''
+Conditions:
+  HasAdminEmail: !Not [!Equals ['', !Ref AdminEmail]]
+Resources:
+  BucketArtifacts:
+    Type: 'AWS::S3::Bucket'
+  Repository:
+    Type: 'AWS::ECR::Repository'
+  Alerting:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        Email: !If [HasAdminEmail, !Ref AdminEmail, !Ref 'AWS::NoValue']
+        # HttpsEndpoint: 'https://api.marbot.io/v1/endpoint/xyz' # or uncommnet and receive alerts in Slack or Microsoft Teams using marbot.io
+      TemplateURL: './node_modules/@cfn-modules/alerting/module.yml'
+  ProjectRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'codebuild.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: ServiceRole
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'logs:CreateLogStream'
+            - 'logs:PutLogEvents'
+            Resource: !GetAtt 'ProjectLogGroup.Arn'
+          - Effect: Allow
+            Action: 'codecommit:GitPull'
+            Resource: !Sub 'arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${CodeCommitRepositoryName}'
+          - Effect: 'Allow'
+            Action: 'ecr:GetAuthorizationToken'
+            Resource: '*'
+          - Effect: 'Allow'
+            Action:
+            - 'ecr:BatchCheckLayerAvailability'
+            - 'ecr:CompleteLayerUpload'
+            - 'ecr:InitiateLayerUpload'
+            - 'ecr:PutImage'
+            - 'ecr:UploadLayerPart'
+            Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${Repository}'
+          - Effect: Allow
+            Action:
+            - 's3:PutObject'
+            - 's3:GetObject'
+            Resource: !Sub 'arn:aws:s3:::${BucketArtifacts}/*'
+          - Effect: Allow # permissions to deploy the CloudFormation stack are not least-privilege!
+            Action:
+            - 'cloudformation:*'
+            - 'rds:*'
+            - 'sns:*'
+            - 'cloudwatch:*'
+            - 'events:*'
+            - 'ec2:*'
+            - 'kms:*'
+            - 'logs:*'
+            - 'iam:*'
+            - 'secretsmanager:*'
+            - 'elasticloadbalancing:*'
+            - 'ecs:*'
+            - 'route53:*'
+            - 'application-autoscaling:*'
+            - 'lambda:*'
+            Resource: '*'
+  ProjectLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      RetentionInDays: 14
+  Project:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+        - Name: ACCOUNT_ID
+          Type: PLAINTEXT
+          Value: !Ref 'AWS::AccountId'
+        - Name: REGION
+          Type: PLAINTEXT
+          Value: !Ref 'AWS::Region'
+        - Name: REPO_NAME
+          Type: PLAINTEXT
+          Value: !Ref Repository
+        - Name: BUCKET_NAME
+          Type: PLAINTEXT
+          Value: !Ref BucketArtifacts
+        Image: 'aws/codebuild/standard:5.0'
+        PrivilegedMode: true # required to build Docker images
+        Type: LINUX_CONTAINER  
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref ProjectLogGroup
+          Status: ENABLED
+      Name: !Ref 'AWS::StackName'
+      ServiceRole: !GetAtt 'ProjectRole.Arn'
+      Source:
+        Location: !Sub 'https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${CodeCommitRepositoryName}'
+        Type: CODECOMMIT
+      TimeoutInMinutes: 30
+  ProjectFailedRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: 'CodeBuild build failed.'
+      EventPattern:
+        source:
+        - 'aws.codebuild'
+        'detail-type':
+        - 'CodeBuild Build State Change'
+        detail:
+          'build-status':
+          - FAILED
+          'project-name':
+          - !Ref Project
+      State: ENABLED
+      Targets:
+      - Arn: !GetAtt 'Alerting.Outputs.Arn'
+        Id: alerting
+  RepositoryChangedRuleRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'events.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: 'codebuild'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: 'codebuild:StartBuild'
+            Resource: !GetAtt 'Project.Arn'
+  RepositoryChangedRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+        - 'aws.codecommit'
+        'detail-type':
+        - 'CodeCommit Repository State Change'
+        resources:
+        - !Sub 'arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${CodeCommitRepositoryName}'
+        detail:
+          referenceType:
+          - branch
+          referenceName:
+          - master
+      State: ENABLED
+      Targets:
+      - Arn: !GetAtt 'Project.Arn'
+        Id: codebuild
+        RoleArn: !GetAtt 'RepositoryChangedRuleRole.Arn'
+Outputs:
+  BucketArtifactsName:
+    Value: !Ref BucketArtifacts 
+  RepositoryName:
+    Value: !Ref Repository
